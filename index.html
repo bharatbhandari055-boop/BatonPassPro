@@ -93,7 +93,7 @@ input:focus,select:focus,button:focus-visible{outline:3px solid #7bbf9b;outline-
 const API_URL = window.API_URL || "";   // set in config.js (Apps Script web app URL ending in /exec)
 const REQUIRE_ALL_TICKED = false;       // true: Yes/No unlock only when every extra order is ticked. false: unlock when at least one is ticked and apply to the ticked ones.
 const DROPDOWN_ABOVE = 6;               // more stores than this -> store dropdown instead of buttons
-const REQUIRE_INSTALL = true;           // true: ScanGate must be installed on the device before the first login there
+const REQUIRE_INSTALL = false;           // true: ScanGate must be installed on the device before the first login there
 /* ==================== */
 
 const $ = s => document.querySelector(s);
@@ -152,7 +152,7 @@ function changePin(){
     if(a===S.pin){$("#err").innerHTML='<div class="msg err">Choose a PIN different from the current one.</div>';return;}
     $("#save").disabled=true;
     try{ const r=await api("change_pin",{new_pin:a}); if(!r.ok) throw new Error(r.error||"Could not save PIN");
-      S.pin=a; localStorage.setItem("rh_user",JSON.stringify({id:S.runner,pin:a})); stores();
+      S.pin=a; localStorage.setItem("rh_user",JSON.stringify({id:S.runner,pin:a})); afterpin();
     }catch(e){ $("#save").disabled=false; $("#err").innerHTML=`<div class="msg err">${esc(e.message)}</div>`; }
   };
 }
@@ -354,3 +354,18 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")) navigat
 </script>
 </body>
 </html>
+function afterPin(){ if(isStandalone()) stores(); else installOffer(); }
+function installOffer(){
+  nav("Install ScanGate");
+  const steps=l=>`<ol style="margin:10px 0 0;padding-left:22px;line-height:1.7">${l.map(x=>`<li>${x}</li>`).join("")}</ol>`;
+  let how;
+  if(deferredInstall) how=`<button class="btn ok" id="offerInstall">Install ScanGate</button>`;
+  else if(isIOS()) how=steps(["Tap the <b>Share</b> button in Safari.","Choose <b>Add to Home Screen</b>.","Open <b>ScanGate</b> from your home screen."]);
+  else how=steps(["Open the browser menu.","Choose <b>Install app</b> or <b>Add to Home screen</b>.","Open <b>ScanGate</b> from your home screen."]);
+  $("#app").innerHTML=`<div class="card"><h2>Add ScanGate to your home screen?</h2>
+    <p style="margin:0;color:var(--mute)">Install the app on this device for quick access.</p>${how}
+    <button class="btn alt" id="offerSkip">Not now</button></div>`;
+  const b=$("#offerInstall");
+  if(b) b.onclick=async()=>{ try{ deferredInstall.prompt(); await deferredInstall.userChoice; }catch(e){} deferredInstall=null; stores(); };
+  $("#offerSkip").onclick=()=>stores();
+}
