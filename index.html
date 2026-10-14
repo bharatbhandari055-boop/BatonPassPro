@@ -7,7 +7,7 @@
 <title>ScanGate</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <style>
-:root{--paper:#f4f5f2;--ink:#14201b;--mute:#6a756f;--line:#d9ddd8;--ok:#1b7f4b;--okbg:#e2f2e8;--extra:#b86a00;--extrabg:#fdf0d9;--bad:#b3261e;--badbg:#fbe4e2;--card:#fff}
+:root{--paper:#f4f5f2;--ink:#14201b;--mute:#6a756f;--line:#d9ddd8;--ok:#1b7f4b;--okbg:#e2f2e8;--extra:#b86a00;--extrabg:#fdf0d9;--bad:#b3261e;--badbg:#fbe4e2;--rej:#5b3a99;--rejbg:#ece6f5;--card:#fff}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%}
 body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--paper);color:var(--ink);padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
@@ -23,6 +23,7 @@ input:focus,select:focus,button:focus-visible{outline:3px solid #7bbf9b;outline-
 .btn{width:100%;font-size:17px;font-weight:650;padding:14px;border-radius:10px;border:0;background:var(--ink);color:#fff;margin-top:12px}
 .btn.alt{background:#fff;color:var(--ink);border:1.5px solid var(--ink)}
 .btn.ok{background:var(--ok)}
+.btn.bad{background:var(--bad)}
 .btn:disabled{opacity:.45}
 .store{display:flex;justify-content:space-between;align-items:center;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px;font-size:16px}
 .store small{color:var(--mute);display:block;margin-top:2px}
@@ -37,6 +38,7 @@ input:focus,select:focus,button:focus-visible{outline:3px solid #7bbf9b;outline-
 .row.matched{background:var(--okbg);color:var(--ok);font-weight:600}
 .row.extra{background:var(--extrabg);color:var(--extra);font-weight:600}
 .row.missing{background:var(--badbg);color:var(--bad);font-weight:600}
+.row.rej{background:var(--rejbg);color:var(--rej);font-weight:600}
 .tag{font-size:12px}
 .bar{position:fixed;left:0;right:0;bottom:0;background:var(--paper);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom));display:flex;gap:10px;max-width:none;z-index:6}
 .bar .btn{margin:0}
@@ -65,13 +67,23 @@ input:focus,select:focus,button:focus-visible{outline:3px solid #7bbf9b;outline-
 <header><h1 id="title">ScanGate</h1><button id="back" class="hidden">Back</button><button id="logout" class="hidden">Log out</button></header>
 <main id="app"></main>
 
+<!-- shown right when an order that is not on the store's list is scanned -->
+<div class="modal" id="askModal"><div class="sheet">
+  <h3>This order is not assigned to you</h3>
+  <p id="askId" style="font-weight:650;color:var(--ink);font-size:18px"></p>
+  <p>Do you want to pick the order?</p>
+  <button class="btn ok" id="askYes">Yes</button>
+  <button class="btn bad" id="askNo">No</button>
+</div></div>
+
+<!-- shown after Done scanning, only when there are extra orders to confirm -->
 <div class="modal" id="extraModal"><div class="sheet">
   <h3 id="exTitle">Extra orders</h3>
-  <p id="exAsk">Did you return these orders to the store?</p>
+  <p id="exAsk">Extra orders pickup confirmation. Select the orders, then choose Yes or No: do you want to pick them?</p>
   <label class="chk all"><input type="checkbox" id="exAll"><span>Select all</span></label>
   <div class="exlist" id="exList"></div>
-  <button class="btn ok" id="exAccept" disabled>Accept (Yes, returned)</button>
-  <button class="btn alt" id="exReject" disabled>Reject (No, keep order)</button>
+  <button class="btn ok" id="exAccept" disabled>Yes</button>
+  <button class="btn bad" id="exReject" disabled>No</button>
   <button class="link" id="exBack">Back to scanning</button>
 </div></div>
 
@@ -79,12 +91,12 @@ input:focus,select:focus,button:focus-visible{outline:3px solid #7bbf9b;outline-
 <script>
 /* ====== CONFIG ====== */
 const API_URL = window.API_URL || "";   // set in config.js (Apps Script web app URL ending in /exec)
-const REQUIRE_ALL_TICKED = false;       // true: Accept/Reject unlock only when every extra order is ticked. false: unlock when at least one is ticked and apply to the ticked ones.
+const REQUIRE_ALL_TICKED = false;       // true: Yes/No unlock only when every extra order is ticked. false: unlock when at least one is ticked and apply to the ticked ones.
 const DROPDOWN_ABOVE = 6;               // more stores than this -> store dropdown instead of buttons
 /* ==================== */
 
 const $ = s => document.querySelector(s);
-const S = { runner:null, pin:null, store:null, orders:[], scanned:new Set(), extras:new Set(), newExtras:new Set(), sel:new Set(), decisions:[], batch:null, scanner:null, scanning:false, started:false, finished:false, lastScan:"", lastAt:0 };
+const S = { runner:null, pin:null, store:null, orders:[], scanned:new Set(), extras:new Set(), newExtras:new Set(), rejected:new Set(), sel:new Set(), decisions:[], batch:null, scanner:null, scanning:false, started:false, finished:false, asking:false, lastScan:"", lastAt:0 };
 
 /* ---------- API ---------- */
 async function api(action, data={}){
@@ -98,15 +110,15 @@ async function api(action, data={}){
 const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function nav(title, back){ $("#title").textContent=title; $("#back").classList.toggle("hidden",!back); $("#logout").classList.toggle("hidden",!S.runner); $("#back").onclick=back||null; }
 function stats(){
-  const matched=S.orders.filter(o=>S.scanned.has(o)), missing=S.orders.filter(o=>!S.scanned.has(o)), extra=[...S.extras,...S.newExtras];
-  return {expected:S.orders.length, scanned:matched.length, missing, matched, extra, total:matched.length+extra.length};
+  const matched=S.orders.filter(o=>S.scanned.has(o)), missing=S.orders.filter(o=>!S.scanned.has(o)), extra=[...S.extras,...S.newExtras], rejected=[...S.rejected];
+  return {expected:S.orders.length, scanned:matched.length, missing, matched, extra, rejected, total:matched.length+extra.length};
 }
 function countsHtml(s){ return `<div class="counts">
   <div><b>${s.expected}</b><span>Expected</span></div><div><b>${s.scanned}</b><span>Scanned</span></div>
   <div class="m"><b>${s.missing.length}</b><span>Missing</span></div><div class="e"><b>${s.extra.length}</b><span>Extra</span></div>
   <div class="r"><b>${s.total}</b><span>Total picked</span></div></div>`; }
 function beep(){ try{navigator.vibrate&&navigator.vibrate(60);}catch(e){} }
-function resetStoreState(){ S.started=false; S.finished=false; S.scanned=new Set(); S.extras=new Set(); S.newExtras=new Set(); S.sel=new Set(); S.decisions=[]; S.batch=null; }
+function resetStoreState(){ S.started=false; S.finished=false; S.asking=false; S.scanned=new Set(); S.extras=new Set(); S.newExtras=new Set(); S.rejected=new Set(); S.sel=new Set(); S.decisions=[]; S.batch=null; }
 
 /* ---------- screens ---------- */
 function login(err){
@@ -179,7 +191,8 @@ function render(){
   const s=stats(); $("#counts").innerHTML=countsHtml(s);
   const rows=S.orders.map(o=>S.scanned.has(o)?`<div class="row matched"><span>${esc(o)}</span><span class="tag">Scanned</span></div>`:S.finished?`<div class="row missing"><span>${esc(o)}</span><span class="tag">Missing</span></div>`:`<div class="row pending"><span>${esc(o)}</span><span class="tag">Not scanned</span></div>`);
   const ex=[...S.extras].map(o=>`<div class="row extra"><span>${esc(o)}</span><span class="tag">Extra</span></div>`).concat([...S.newExtras].map(o=>`<div class="row extra"><span>${esc(o)}</span><span class="tag">Extra · to confirm</span></div>`));
-  $("#list").innerHTML=`<h2>Orders for this store</h2>${rows.join("")}${ex.length?`<h2 style="margin-top:14px">Extra orders</h2>${ex.join("")}`:""}`;
+  const rj=[...S.rejected].map(o=>`<div class="row rej"><span>${esc(o)}</span><span class="tag">Rejected</span></div>`);
+  $("#list").innerHTML=`<h2>Orders for this store</h2>${rows.join("")}${ex.length?`<h2 style="margin-top:14px">Extra orders</h2>${ex.join("")}`:""}${rj.length?`<h2 style="margin-top:14px">Order Scanned But Rejected</h2>${rj.join("")}`:""}`;
 }
 
 /* ---------- scanning ---------- */
@@ -198,15 +211,26 @@ async function stopScan(){
 }
 function onCode(raw){
   const code=String(raw).trim(); const now=Date.now();
-  if(!code||(!S.scanning&&S.scanner)) return;
+  if(!code||S.asking||(!S.scanning&&S.scanner)) return;
   if(code===S.lastScan&&now-S.lastAt<2500) return; S.lastScan=code;S.lastAt=now;
   if(S.scanned.has(code)||S.extras.has(code)||S.newExtras.has(code)){ beep(); return; }
-  if(S.orders.includes(code)) S.scanned.add(code);
-  else S.newExtras.add(code);          // not on this store's list: held as Extra, confirmed in the popup after Done scanning
-  beep(); render();
+  if(S.orders.includes(code)){ S.scanned.add(code); beep(); render(); return; }
+  askPick(code);                         // not on this store's list: ask right away, before Done scanning
 }
 
-/* ---------- extra orders popup (after Done scanning, only when there are new extras) ---------- */
+/* ---------- popup 1: order not assigned to you, pick it? (at scan time) ---------- */
+function askPick(code){ S.asking=true; beep(); $("#askId").textContent=code; $("#askModal").classList.add("on"); }
+function answerPick(yes){
+  const code=$("#askId").textContent, at=new Date().toISOString();
+  $("#askModal").classList.remove("on");
+  if(yes){ S.newExtras.add(code); S.rejected.delete(code); S.decisions.push({order_id:code,decision:"ACCEPTED",stage:"SCAN",at}); }   // added to Extra, confirmed again after Done scanning
+  else   { S.rejected.add(code); S.decisions.push({order_id:code,decision:"REJECTED",stage:"SCAN",at}); }                              // nothing changes; shown as Rejected in the email
+  S.asking=false; S.lastScan=code; S.lastAt=Date.now(); render();
+}
+$("#askYes").onclick=()=>answerPick(true);
+$("#askNo").onclick=()=>answerPick(false);
+
+/* ---------- popup 2: extra orders pickup confirmation (after Done scanning, only when there are extras to confirm) ---------- */
 function openExtraPopup(){ S.sel=new Set(); renderPopup(); $("#extraModal").classList.add("on"); }
 function renderPopup(){
   const list=[...S.newExtras];
@@ -218,17 +242,18 @@ function renderPopup(){
 function syncPopup(){
   const n=S.newExtras.size, k=S.sel.size;
   $("#exAll").checked=n>0&&k===n; $("#exAll").indeterminate=k>0&&k<n;
-  $("#exAccept").disabled=$("#exReject").disabled=REQUIRE_ALL_TICKED?(k!==n):(k===0);
+  $("#exAccept").disabled=$("#exReject").disabled=REQUIRE_ALL_TICKED?(k!==n):(k===0);   // greyed until orders are selected
 }
 $("#exAll").onchange=e=>{ S.sel=e.target.checked?new Set(S.newExtras):new Set(); renderPopup(); };
 $("#exBack").onclick=()=>{ $("#extraModal").classList.remove("on"); };
 $("#exAccept").onclick=()=>decide(true);
 $("#exReject").onclick=()=>decide(false);
-function decide(accept){
+function decide(yes){
+  const at=new Date().toISOString();
   [...S.sel].forEach(o=>{
     S.newExtras.delete(o);
-    if(accept) S.decisions.push({order_id:o,decision:"ACCEPTED"});             // returned to the store: removed from the runner's list
-    else { S.extras.add(o); S.decisions.push({order_id:o,decision:"REJECTED"}); } // kept: stays as Extra
+    if(yes){ S.extras.add(o); S.rejected.delete(o); S.decisions.push({order_id:o,decision:"ACCEPTED",stage:"DONE",at}); }   // pickup confirmed: stays in Extra
+    else   { S.rejected.add(o); S.decisions.push({order_id:o,decision:"REJECTED",stage:"DONE",at}); }                       // not picked: nothing added, shown as Rejected in the email
   });
   S.sel=new Set(); render();
   if(S.newExtras.size) renderPopup(); else { $("#extraModal").classList.remove("on"); submitDone(); }
@@ -245,7 +270,7 @@ async function submitDone(){
   const s=stats();
   if(!S.batch&&!s.matched.length&&!s.extra.length){ alert("No orders left to hand over."); scanScreen(); return; }
   S.finished=true; render(); $("#doneBtn").disabled=true; $("#doneBtn").textContent="Sending OTP…";
-  try{ const r=await api("done",{vendor:S.store.vendor,store:S.store.name,matched:s.matched,extra:s.extra,decisions:S.decisions});
+  try{ const r=await api("done",{vendor:S.store.vendor,store:S.store.name,matched:s.matched,extra:s.extra,rejected:s.rejected,decisions:S.decisions});
     if(!r.ok){ if(r.must_change_pin){changePin();return;} throw new Error(r.error||"Could not create handover"); }
     S.batch=r.batch_id; S.decisions=[]; otpScreen(r);
   }catch(e){ alert(e.message); S.finished=false; render(); $("#doneBtn").disabled=false; $("#doneBtn").textContent="Done scanning"; }
@@ -258,6 +283,7 @@ function otpScreen(r){
     <label for="otp">OTP</label><input id="otp" class="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
     <div id="err"></div><button class="btn ok" id="verify">Confirm handover</button>
     <button class="btn alt" id="more">Scan more orders</button></div>
+    ${s.rejected.length?`<h2>Order Scanned But Rejected (${s.rejected.length})</h2>`+s.rejected.map(o=>`<div class="row rej"><span>${esc(o)}</span><span class="tag">Not picked</span></div>`).join(""):""}
     ${s.missing.length?`<h2>Missing (${s.missing.length})</h2>`+s.missing.map(o=>`<div class="row missing"><span>${esc(o)}</span><span class="tag">Not received</span></div>`).join(""):""}`;
   $("#more").onclick=()=>{S.started=false;S.finished=false;scanScreen();};
   $("#verify").onclick=async()=>{
